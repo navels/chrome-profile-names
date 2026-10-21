@@ -127,14 +127,20 @@ async function pairing($: EngineInterface, store: string): Promise<{ deviceId: s
   return { deviceId, displayName: jsonString(snap, KEY_NAME) || jsonString(snap, KEY_DEFAULT_NAME) }
 }
 
-/** Finds every paired browser on this machine, keyed by device ID. */
+/** Finds every paired browser on this machine, keyed by device ID. Says what it found in the debug log. */
 export async function scan($: EngineInterface): Promise<ProfileMap> {
   const map: ProfileMap = new Map()
-  for (const [browser, root] of await chromeRoots($)) {
-    for (const [folder, { name, email }] of await profileNames($, root)) {
+  const debug = (line: string) => $.ui.log(`chrome-profile-names: ${line}`, { to: 'debug' })
+  const roots = await chromeRoots($)
+  debug(`browser data directories found: ${roots.length}${roots.length ? ' (' + roots.map(r => r[1]).join(', ') + ')' : ''}`)
+  for (const [browser, root] of roots) {
+    const names = await profileNames($, root)
+    debug(`${root}: ${names.size} profiles`)
+    for (const [folder, { name, email }] of names) {
       const store = `${root}/${folder}/Local Extension Settings/${CLAUDE_EXT_ID}`
       if (!(await $.fs.exists(store).catch(() => false))) continue
       const paired = await pairing($, store)
+      debug(`${folder}: extension store found, ${paired ? 'paired as ' + paired.deviceId : 'no pairing read'}`)
       if (!paired) continue
       const who = email ? `${name} <${email}>` : name
       map.set(paired.deviceId, { name: paired.displayName || name, profile: `${who}, ${browser} / ${folder}` })
