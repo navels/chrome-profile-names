@@ -1,18 +1,10 @@
 {
   "name": "chrome-profile-names",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Show your Chrome profile names (Home, Work) instead of 'Browser 1' and device IDs when Claude in Chrome asks which browser to use. Browsers on other computers are marked as such.",
   "author": {
     "name": "Lee Nave",
     "url": "https://github.com/navels"
   },
-  "license": "MIT",
-  "userConfig": {
-    "remoteNames": {
-      "type": "string",
-      "title": "Names for browsers on other computers",
-      "description": "deviceId=name entries separated by commas, for example e5b8c3d1-2a7f-4e9b-b6c4-9d0e1f2a3b4c=mini. The mod can only read the names of browsers on this computer; this fills in the rest.",
-      "default": ""
-    }
-  }
+  "license": "MIT"
 }

@@ -21,7 +21,9 @@ const LIST_NOTE = '2 browsers are connected and none is selected for this sessio
 type On = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[1]
 
 /** A fake Chrome on disk: two profiles paired, one with the extension but never paired, one without it. */
-function fakeChrome(on: On, { homeSet = true, touched = { disk: false } } = {}) {
+type Store = { names?: Record<string, string> }
+
+function fakeChrome(on: On, { homeSet = true, touched = { disk: false }, kept = {} as Store } = {}) {
   const text = new Map<string, string>()
   const bytes = new Map<string, Uint8Array>()
   const dirs = new Map<string, string[]>()
@@ -49,6 +51,11 @@ function fakeChrome(on: On, { homeSet = true, touched = { disk: false } } = {}) 
   store('Profile 2', { '000003.log': buildLog([{ seq: 1, writes: [{ key: 'anonymousId', value: '"x"' }] }]) })
 
   on('clock.now', () => ({ value: NOW }))
+  on('store.get', (_, e) => ({ value: e.key === 'remoteNames' ? kept.names : undefined }))
+  on('store.set', (_, e) => {
+    if (e.key === 'remoteNames') kept.names = e.value as Record<string, string>
+    return { value: undefined }
+  })
   on('env.get', (_, e) => ({ value: e.name === 'HOME' && homeSet ? '/h' : undefined }))
   on('fs.exists', (_, e) => {
     touched.disk = true
@@ -91,8 +98,8 @@ test('local browsers get Chrome names; a browser on another computer is marked a
   expect((ran.result as unknown[])[1]).toEqual({ type: 'text', text: LIST_NOTE })
 })
 
-test('a remote browser named in the remoteNames setting gets that name', { options: { remoteNames: `${OTHER}=mini, bogus` } }, async ($, on) => {
-  fakeChrome(on)
+test('a remote browser that was named before gets that name', async ($, on) => {
+  fakeChrome(on, { kept: { names: { [OTHER]: 'mini' } } })
   on('tool.call', () => ({ result: [{ type: 'text', text: LIST_TEXT }] }))
 
   const ran = await $.tool.call({ tool: LIST_TOOL })
@@ -146,8 +153,8 @@ test('a call the engine reported as an error is left alone', async ($, on) => {
   expect(String(ran.result)).toContain('"name":"Browser 1"')
 })
 
-test('the picker shows Chrome names for local browsers and marks remote ones', { options: { remoteNames: `${OTHER}=mini` } }, async ($, on) => {
-  fakeChrome(on)
+test('the picker shows Chrome names for local browsers and marks remote ones', async ($, on) => {
+  fakeChrome(on, { kept: { names: { [OTHER]: 'mini' } } })
   on('tool.call', (_, e) => ({ result: e.tool === 'AskUserQuestion' ? e.questions : null }))
 
   const ran = await $.tool.call({
@@ -216,6 +223,68 @@ test('choosing a browser answers with its name and marks it selected afterwards'
   })
   const options = (asked.result as { options: { description: string }[] }[])[0]?.options ?? []
   expect(options[1]?.description).toBe('Lee <lee@example.com>, Chrome / Default Selected now.')
+})
+
+/** Stands for the engine beneath the mod: answers select_browser, and answers the mod's own question with `reply`. */
+function engineThatAnswers(on: On, reply: string, asked: string[] = []) {
+  on('tool.call', (_, e) => {
+    if (e.tool === SELECT_TOOL) return { result: [{ type: 'text', text: 'Selected browser "Browser 2".' }] }
+    if (e.tool === 'AskUserQuestion') {
+      const question = e.questions[0]!.question
+      asked.push(question)
+      return { result: { questions: e.questions, answers: { [question]: reply } } }
+    }
+    return { result: null }
+  })
+  return asked
+}
+
+test('picking an unnamed browser on another computer asks for a name and remembers it', async ($, on) => {
+  const store: Store = {}
+  fakeChrome(on, { kept: store })
+  const asked = engineThatAnswers(on, 'mini')
+
+  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(asked).toEqual([`This browser is on another computer (${OTHER}). What should it be called from now on?`])
+  expect(store.names).toEqual({ [OTHER]: 'mini' })
+  expect(textOf(chose.result)).toBe('Selected browser "mini".')
+
+  // Named now: picking it again asks nothing.
+  await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(asked.length).toBe(1)
+})
+
+test('"Skip for now" remembers nothing, so it is asked again', async ($, on) => {
+  const store: Store = {}
+  fakeChrome(on, { kept: store })
+  const asked = engineThatAnswers(on, 'Skip for now')
+
+  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(store.names).toBeUndefined()
+  expect(textOf(chose.result)).toBe('Selected browser "Browser 2".')
+  await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(asked.length).toBe(2)
+})
+
+test('"Don\'t ask again" is remembered, and the browser stays unnamed', async ($, on) => {
+  const store: Store = {}
+  fakeChrome(on, { kept: store })
+  const asked = engineThatAnswers(on, "Don't ask again")
+
+  await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(store.names).toEqual({ [OTHER]: '' })
+  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: OTHER })
+  expect(asked.length).toBe(1)
+  expect(textOf(chose.result)).toBe('Selected browser "Browser 2".')
+})
+
+test('picking a local browser never asks', async ($, on) => {
+  fakeChrome(on)
+  const asked = engineThatAnswers(on, 'unused')
+
+  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: HOME })
+  expect(asked).toEqual([])
+  expect(textOf(chose.result)).toBe('Selected browser "Home".')
 })
 
 test('a question with no device ids is passed through without touching the disk', async ($, on) => {

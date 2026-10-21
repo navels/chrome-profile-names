@@ -6,8 +6,8 @@ import { scan, type ProfileMap } from './profiles'
 // "Browser 2" and tells them apart by a device ID. Chrome knows more: which
 // profile the browser is, and the name you typed when you paired it. This
 // mod shows those names instead. A browser that isn't paired in any Chrome
-// profile on this machine is on another computer; it's shown as such, with
-// the name from the `remoteNames` setting if you gave it one.
+// profile on this machine is on another computer; it's shown as such, and
+// the first time you pick one the mod asks what to call it and remembers.
 
 const LIST_TOOL = 'mcp__claude-in-chrome__list_connected_browsers'
 const SELECT_TOOL = 'mcp__claude-in-chrome__select_browser'
@@ -34,15 +34,42 @@ async function profiles($: EngineInterface): Promise<ProfileMap> {
   return map
 }
 
-/** Names for browsers on other computers, from the `remoteNames` setting: `deviceId=name` entries separated by commas or newlines. */
-function parseRemoteNames(setting: unknown): Map<string, string> {
-  const entries = typeof setting === 'string' ? setting.split(/[\n,]/) : []
+const NAMES_KEY = 'remoteNames' // in $.store, kept across sessions: { [deviceId]: name }, '' meaning "don't ask"
+const SKIP = 'Skip for now'
+const NEVER = "Don't ask again"
+
+/** Names given to browsers on other computers, from the mod's own store. */
+async function remoteNames($: EngineInterface): Promise<Map<string, string>> {
+  const held = await $.store.get(NAMES_KEY)
   const names = new Map<string, string>()
-  for (const entry of entries) {
-    const m = /^\s*([0-9a-f-]{36})\s*[=:]\s*(.+?)\s*$/i.exec(String(entry))
-    if (m) names.set(m[1]!.toLowerCase(), m[2]!)
+  if (typeof held === 'object' && held !== null) {
+    for (const [id, name] of Object.entries(held)) {
+      if (typeof name === 'string') names.set(id.toLowerCase(), name)
+    }
   }
   return names
+}
+
+/**
+ * Asks what to call a browser on another computer, the first time it's
+ * picked, and remembers the answer. "Skip for now" asks again another time;
+ * "Don't ask again" remembers that instead. A dismissed dialog counts as skip.
+ */
+async function askRemoteName($: EngineInterface, id: string): Promise<void> {
+  const names = await remoteNames($)
+  if (names.has(id)) return
+  let answer: string
+  try {
+    answer = await $.ui.ask(
+      `This browser is on another computer (${id}). What should it be called from now on?`,
+      { options: [SKIP, NEVER], header: 'Browser name' },
+    )
+  } catch {
+    return
+  }
+  if (answer === SKIP || answer.trim() === '') return
+  names.set(id, answer === NEVER ? '' : answer.trim())
+  await $.store.set(NAMES_KEY, Object.fromEntries(names))
 }
 
 /** What we know about one browser: its name, where it is, and whether it's on this machine. */
@@ -55,7 +82,7 @@ function lookupWith(map: ProfileMap, remoteNames: Map<string, string>): Lookup {
     const local = map.get(key)
     if (local) return { name: local.name, where: local.profile, local: true }
     const remote = remoteNames.get(key)
-    return remote ? { name: remote, where: ELSEWHERE, local: false } : undefined
+    return remote ? { name: remote, where: ELSEWHERE, local: false } : undefined // '' (don't ask) is unnamed
   }
 }
 
@@ -168,20 +195,19 @@ function relabelOption(option: Option, lookup: Lookup): Option {
 }
 
 /** The lookup for one call, or undefined when no profile on this machine can be read (then nothing is touched). */
-async function lookupFor($: EngineInterface, remoteNames: Map<string, string>): Promise<Lookup | undefined> {
+async function lookupFor($: EngineInterface): Promise<Lookup | undefined> {
   const map = await profiles($)
-  return map.size === 0 ? undefined : lookupWith(map, remoteNames)
+  return map.size === 0 ? undefined : lookupWith(map, await remoteNames($))
 }
 
-export const register: Register = (on, options) => {
-  const remoteNames = parseRemoteNames(options.remoteNames)
+export const register: Register = on => {
 
   // The extension's list. Fixing it here means the right name shows up
   // everywhere Claude mentions the browser, not just in the picker.
   on('tool.call', { tool: LIST_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
-    const lookup = await lookupFor($, remoteNames)
+    const lookup = await lookupFor($)
     if (!lookup) return ran
     const now = await $.clock.now()
     const result = mapResult(ran.result, text => rewriteList(text, lookup, now))
@@ -189,12 +215,20 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // Picking a browser. The extension answers `Selected browser "Browser 2"`.
+  // A browser on another computer with no name yet gets asked for one here.
   on('tool.call', { tool: SELECT_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
     const id = typeof e.deviceId === 'string' ? e.deviceId.toLowerCase() : undefined
-    if (id) selected = id
-    const known = id ? (await lookupFor($, remoteNames))?.(id) : undefined
+    if (!id) return ran
+    selected = id
+    let lookup = await lookupFor($)
+    if (!lookup) return ran
+    if (!lookup(id)) {
+      await askRemoteName($, id)
+      lookup = (await lookupFor($)) ?? lookup
+    }
+    const known = lookup(id)
     if (!known) return ran
     const result = mapResult(ran.result, text => text.replace(/"Browser \d+"/, `"${known.name}"`))
     return result === undefined ? ran : { result }
@@ -204,7 +238,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: SWITCH_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
-    const lookup = await lookupFor($, remoteNames)
+    const lookup = await lookupFor($)
     if (!lookup) return ran
     const now = await $.clock.now()
     const result = mapResult(ran.result, text => rewriteList(text, lookup, now))
@@ -214,7 +248,7 @@ export const register: Register = (on, options) => {
   // The picker itself, in case Claude wrote it from memory rather than from the list.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (idsIn(JSON.stringify(e.questions)).length === 0) return next(e)
-    const lookup = await lookupFor($, remoteNames)
+    const lookup = await lookupFor($)
     if (!lookup) return next(e)
     const questions = e.questions.map(question => ({
       ...question,

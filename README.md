@@ -14,7 +14,7 @@ The mod hooks the extension's tool calls:
 - `select_browser` and `switch_browser`: the confirmation names the browser the same way.
 - `AskUserQuestion`: any option that names a device ID gets the Chrome name as its label, or is marked as being on another computer. The browser the session is currently using is marked selected.
 
-A browser whose device ID isn't paired in any Chrome profile on this machine is on another computer, and the mod can't read its name from here. It's shown with what the extension does report: "another computer (macOS), connected 5 hours ago". To give it a name, put `deviceId=name` in the `remoteNames` setting in `/config`, with commas between entries. Device IDs only change when you re-pair, so that's a one-time step per machine.
+A browser whose device ID isn't paired in any Chrome profile on this machine is on another computer, and the mod can't read its name from here. It's shown with what the extension does report: "another computer (macOS), connected 5 hours ago". The first time you pick such a browser, the mod asks what to call it and remembers the answer across sessions. You can skip for now, or say don't ask again. Device IDs only change when you re-pair, so you're asked once per machine.
 
 If the mod can't read any Chrome profile on this machine at all, it leaves everything as it was. It doesn't guess, because a wrong name here means acting in the wrong browser.
 
