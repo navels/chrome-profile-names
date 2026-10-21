@@ -54,8 +54,13 @@ async function chromeRoots($: EngineInterface): Promise<[string, string][]> {
   }
   const roots: [string, string][] = []
   for (const [label, root] of candidates) {
-    if (await $.fs.exists(`${root}/Local State`).catch(() => false)) roots.push([label, root])
+    try {
+      if (await $.fs.exists(`${root}/Local State`)) roots.push([label, root])
+    } catch (error) {
+      $.ui.log(`chrome-profile-names: cannot check ${root}: ${String(error).slice(0, 200)}`, { to: 'debug' })
+    }
   }
+  if (!home && !localAppData) $.ui.log('chrome-profile-names: neither HOME nor LOCALAPPDATA is set', { to: 'debug' })
   return roots
 }
 
