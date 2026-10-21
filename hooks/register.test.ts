@@ -287,6 +287,46 @@ test('picking a local browser never asks', async ($, on) => {
   expect(textOf(chose.result)).toBe('Selected browser "Home".')
 })
 
+/** Brings the session up so the command is registered. */
+async function startSession($: Parameters<Parameters<typeof test>[1] extends infer B ? Extract<B, (...a: never[]) => unknown> : never>[0], on: On) {
+  on('command.register', () => ({ value: { command: 'browser-names' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+}
+
+test('/browser-names lists, names, renames and forgets', async ($, on) => {
+  const store: Store = { names: { [OTHER]: 'mini', '7a2d9e40-c6b1-4f3a-8e5d-1b9c3a7f2e64': '' } }
+  fakeChrome(on, { kept: store })
+  await startSession($, on)
+  const run = async (args: string) => (await $.command.run({
+    command: 'browser-names', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 },
+  })).text ?? ''
+
+  expect(await run('')).toBe(`Browsers on other computers:\n  ${OTHER}  mini\n  7a2d9e40-c6b1-4f3a-8e5d-1b9c3a7f2e64  (not named; not asked again)`)
+  expect(await run('e5b8c3d1 the mini')).toBe(`${OTHER} is now "the mini".`)
+  expect(store.names?.[OTHER]).toBe('the mini')
+  expect(await run('7a2d9e40 laptop')).toBe('7a2d9e40-c6b1-4f3a-8e5d-1b9c3a7f2e64 is now "laptop".')
+  expect(await run(`forget ${OTHER}`)).toBe(`Forgot ${OTHER}. You'll be asked for a name the next time you pick it.`)
+  expect(store.names).toEqual({ '7a2d9e40-c6b1-4f3a-8e5d-1b9c3a7f2e64': 'laptop' })
+})
+
+test('/browser-names explains itself and refuses bad ids', async ($, on) => {
+  const store: Store = { names: { [OTHER]: 'mini', [WORK]: 'twin' } }
+  fakeChrome(on, { kept: store })
+  await startSession($, on)
+  const run = async (args: string) => (await $.command.run({
+    command: 'browser-names', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 },
+  })).text ?? ''
+
+  expect(await run('mini')).toContain('/browser-names <id> <name>')
+  expect(await run('xyz name')).toBe('"xyz" isn\'t a device id (at least 8 hex characters).')
+  expect(await run('deadbeef name')).toBe('No named browser starts with "deadbeef".')
+  expect(await run('forget 00000000-0000-4000-8000-000000000000')).toBe('No name was stored for 00000000-0000-4000-8000-000000000000.')
+  // A full id that is not stored yet can still be named outright.
+  expect(await run('00000000-0000-4000-8000-000000000000 spare')).toBe('00000000-0000-4000-8000-000000000000 is now "spare".')
+  expect(store.names?.['00000000-0000-4000-8000-000000000000']).toBe('spare')
+})
+
 test('a question with no device ids is passed through without touching the disk', async ($, on) => {
   const touched = { disk: false }
   fakeChrome(on, { touched })

@@ -8,6 +8,7 @@ import { scan, type ProfileMap } from './profiles'
 // mod shows those names instead. A browser that isn't paired in any Chrome
 // profile on this machine is on another computer; it's shown as such, and
 // the first time you pick one the mod asks what to call it and remembers.
+// `/browser-names` lists, changes and forgets those names.
 
 const LIST_TOOL = 'mcp__claude-in-chrome__list_connected_browsers'
 const SELECT_TOOL = 'mcp__claude-in-chrome__select_browser'
@@ -37,6 +38,12 @@ async function profiles($: EngineInterface): Promise<ProfileMap> {
 const NAMES_KEY = 'remoteNames' // in $.store, kept across sessions: { [deviceId]: name }, '' meaning "don't ask"
 const SKIP = 'Skip for now'
 const NEVER = "Don't ask again"
+const COMMAND = 'browser-names'
+const USAGE = [
+  `/${COMMAND}                      list the browsers on other computers you've named`,
+  `/${COMMAND} <id> <name>          name one, or rename it (the first 8 characters of the id are enough)`,
+  `/${COMMAND} forget <id>          forget its name, so you're asked again the next time you pick it`,
+].join('\n')
 
 /** Names given to browsers on other computers, from the mod's own store. */
 async function remoteNames($: EngineInterface): Promise<Map<string, string>> {
@@ -69,7 +76,7 @@ async function askRemoteName($: EngineInterface, id: string): Promise<void> {
   }
   if (answer === SKIP || answer.trim() === '') return
   names.set(id, answer === NEVER ? '' : answer.trim())
-  await $.store.set(NAMES_KEY, Object.fromEntries(names))
+  await saveRemoteNames($, names)
 }
 
 /** What we know about one browser: its name, where it is, and whether it's on this machine. */
@@ -194,6 +201,45 @@ function relabelOption(option: Option, lookup: Lookup): Option {
   return { ...option, label, description }
 }
 
+async function saveRemoteNames($: EngineInterface, names: Map<string, string>): Promise<void> {
+  await $.store.set(NAMES_KEY, Object.fromEntries(names))
+}
+
+/** The stored id that `given` names: the whole id, or a prefix of 8 or more characters that matches exactly one. */
+function matchId(names: Map<string, string>, given: string): string | { error: string } {
+  const key = given.trim().toLowerCase()
+  if (key.length < 8 || /[^0-9a-f-]/.test(key)) return { error: `"${given}" isn't a device id (at least 8 hex characters).` }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(key)) return key
+  const hits = [...names.keys()].filter(id => id.startsWith(key))
+  if (hits.length === 1) return hits[0]!
+  return { error: hits.length === 0 ? `No named browser starts with "${given}".` : `"${given}" matches ${hits.length} named browsers; give more of the id.` }
+}
+
+/** Serves `/browser-names`: list, name or rename, forget. */
+async function runCommand($: EngineInterface, args: string): Promise<string> {
+  const names = await remoteNames($)
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) {
+    const rows = [...names].map(([id, name]) => `  ${id}  ${name || '(not named; not asked again)'}`)
+    return rows.length ? `Browsers on other computers:\n${rows.join('\n')}` : `No browser on another computer has been named yet.\n${USAGE}`
+  }
+  if (words[0] === 'forget') {
+    if (words.length !== 2) return USAGE
+    const id = matchId(names, words[1]!)
+    if (typeof id !== 'string') return id.error
+    if (!names.delete(id)) return `No name was stored for ${id}.`
+    await saveRemoteNames($, names)
+    return `Forgot ${id}. You'll be asked for a name the next time you pick it.`
+  }
+  if (words.length < 2) return USAGE
+  const id = matchId(names, words[0]!)
+  if (typeof id !== 'string') return id.error
+  const name = words.slice(1).join(' ')
+  names.set(id, name)
+  await saveRemoteNames($, names)
+  return `${id} is now "${name}".`
+}
+
 /** The lookup for one call, or undefined when no profile on this machine can be read (then nothing is touched). */
 async function lookupFor($: EngineInterface): Promise<Lookup | undefined> {
   const map = await profiles($)
@@ -201,6 +247,17 @@ async function lookupFor($: EngineInterface): Promise<Lookup | undefined> {
 }
 
 export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: COMMAND,
+      description: 'List, name or forget the Chrome browsers on other computers',
+      argumentHint: '[<id> <name> | forget <id>]',
+    })
+    return next(e)
+  })
+
+  on('command.run', { command: COMMAND }, async ($, e) => ({ text: await runCommand($, e.args) }))
+
 
   // The extension's list. Fixing it here means the right name shows up
   // everywhere Claude mentions the browser, not just in the picker.

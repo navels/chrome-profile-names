@@ -16,6 +16,14 @@ The mod hooks the extension's tool calls:
 
 A browser whose device ID isn't paired in any Chrome profile on this machine is on another computer, and the mod can't read its name from here. It's shown with what the extension does report: "another computer (macOS), connected 5 hours ago". The first time you pick such a browser, the mod asks what to call it and remembers the answer across sessions. You can skip for now, or say don't ask again. Device IDs only change when you re-pair, so you're asked once per machine.
 
+To see or change those names later, there's a slash command:
+
+```
+/browser-names                     list the browsers on other computers you've named
+/browser-names <id> <name>         name one, or rename it (the first 8 characters of the id are enough)
+/browser-names forget <id>         forget its name, so you're asked again the next time you pick it
+```
+
 If the mod can't read any Chrome profile on this machine at all, it leaves everything as it was. It doesn't guess, because a wrong name here means acting in the wrong browser.
 
 ## Install
