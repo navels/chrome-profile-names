@@ -10,9 +10,12 @@ const OTHER = 'e5b8c3d1-2a7f-4e9b-b6c4-9d0e1f2a3b4c'
 const EXT = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'
 const ROOT = '/h/Library/Application Support/Google/Chrome'
 
+const NOW = 1_700_000_000_000
+const FIVE_HOURS_AGO = NOW - 5 * 3_600_000
+
 const LIST_TEXT =
   `[{"deviceId":"${HOME}","name":"Browser 1","osPlatform":"macOS","isLocal":true},` +
-  `{"deviceId":"${OTHER}","name":"Browser 2","osPlatform":"macOS","isLocal":true}]`
+  `{"deviceId":"${OTHER}","name":"Browser 2","osPlatform":"macOS","connectedAt":${FIVE_HOURS_AGO},"isLocal":true}]`
 const LIST_NOTE = '2 browsers are connected and none is selected for this session.'
 
 type On = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[1]
@@ -45,7 +48,7 @@ function fakeChrome(on: On, { homeSet = true, touched = { disk: false } } = {}) 
   ] }]) })
   store('Profile 2', { '000003.log': buildLog([{ seq: 1, writes: [{ key: 'anonymousId', value: '"x"' }] }]) })
 
-  on('clock.now', () => ({ value: 1_700_000_000_000 }))
+  on('clock.now', () => ({ value: NOW }))
   on('env.get', (_, e) => ({ value: e.name === 'HOME' && homeSet ? '/h' : undefined }))
   on('fs.exists', (_, e) => {
     touched.disk = true
@@ -72,7 +75,9 @@ function textOf(result: unknown): string {
   return (blocks[0] as { text: string }).text
 }
 
-test('the connected-browser list gets Chrome names, and a browser from another machine is hidden', async ($, on) => {
+const CONFIRM = 'Open a confirmation screen in every connected Chrome extension and let me select the right one there.'
+
+test('local browsers get Chrome names; a browser on another computer is marked as such', async ($, on) => {
   fakeChrome(on)
   // The engine hands an MCP result over as its content blocks.
   on('tool.call', () => ({ result: [{ type: 'text', text: LIST_TEXT }, { type: 'text', text: LIST_NOTE }] }))
@@ -81,23 +86,21 @@ test('the connected-browser list gets Chrome names, and a browser from another m
   const text = textOf(ran.result)
   expect(text).toContain(`"deviceId":"${HOME}","name":"Home"`)
   expect(text).toContain('"profile":"Lee <lee@example.com>, Chrome / Default"')
-  expect(text).not.toContain(`"deviceId":"${OTHER}"`)
-  expect(text).toContain(`Hidden by chrome-profile-names, not paired in any Chrome profile on this machine: Browser 2 (${OTHER}).`)
+  expect(text).toContain(`"deviceId":"${OTHER}","name":"Browser 2"`)
+  expect(text).toContain('"where":"another computer (macOS), connected 5 hours ago"')
   expect((ran.result as unknown[])[1]).toEqual({ type: 'text', text: LIST_NOTE })
 })
 
-test('with hideRemote off, the other machine stays listed', { options: { hideRemote: false } }, async ($, on) => {
+test('a remote browser named in the remoteNames setting gets that name', { options: { remoteNames: `${OTHER}=mini, bogus` } }, async ($, on) => {
   fakeChrome(on)
-  on('tool.call', () => ({ result: [{ type: 'text', text: LIST_TEXT }, { type: 'text', text: LIST_NOTE }] }))
+  on('tool.call', () => ({ result: [{ type: 'text', text: LIST_TEXT }] }))
 
   const ran = await $.tool.call({ tool: LIST_TOOL })
-  const text = textOf(ran.result)
-  expect(text).toContain(`"deviceId":"${HOME}","name":"Home"`)
-  expect(text).toContain(`"deviceId":"${OTHER}","name":"Browser 2"`)
-  expect(text).not.toContain('Hidden by')
+  expect(textOf(ran.result)).toContain(`"deviceId":"${OTHER}","name":"mini"`)
+  expect(textOf(ran.result)).toContain('"where":"another computer (macOS), connected 5 hours ago"')
 })
 
-test('the relay prose after the list gets the Chrome name and says "selected"', async ($, on) => {
+test('the sentence after the list gets the name and says "selected"', async ($, on) => {
   fakeChrome(on)
   const inUse = `[{"deviceId":"${WORK}","name":"Browser 1","inUse":true},{"deviceId":"${HOME}","name":"Browser 2"}]`
   const prose = `2 browsers are connected; "Browser 1" (deviceId ${WORK}) is the one in use for this session. No question is needed.`
@@ -109,62 +112,13 @@ test('the relay prose after the list gets the Chrome name and says "selected"', 
   expect(blocks[0]?.text).toContain(`"name":"Work","inUse":true`)
 })
 
-test('the selected browser is marked in the dialog, and "in use" becomes "selected"', async ($, on) => {
-  fakeChrome(on)
-  on('tool.call', (_, e) => e.tool === LIST_TOOL
-    ? { result: [{ type: 'text', text: `[{"deviceId":"${WORK}","name":"Browser 1","inUse":true},{"deviceId":"${HOME}","name":"Browser 2"}]` }] }
-    : { result: e.tool === 'AskUserQuestion' ? e.questions : null })
-
-  await $.tool.call({ tool: LIST_TOOL })
-  const ran = await $.tool.call({
-    tool: 'AskUserQuestion',
-    questions: [{ question: 'Which browser?', header: 'Browser', multiSelect: false, options: [
-      { label: `Browser 1 (${WORK})`, description: 'Currently in use.' },
-      { label: `Browser 2 (${HOME})`, description: '' },
-    ] }],
-  })
-  const options = (ran.result as { options: { label: string; description: string }[] }[])[0]?.options ?? []
-  expect(options[0]?.description).toBe('Currently selected. (Acme <lee@acme.example>, Chrome / Profile 1)')
-  expect(options[1]?.description).toBe('Lee <lee@example.com>, Chrome / Default')
-})
-
-test('choosing a browser answers with its Chrome name and marks it selected afterwards', async ($, on) => {
-  fakeChrome(on)
-  on('tool.call', (_, e) => e.tool === SELECT_TOOL
-    ? { result: [{ type: 'text', text: 'Selected browser "Browser 2".' }] }
-    : { result: e.tool === 'AskUserQuestion' ? e.questions : null })
-
-  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: HOME })
-  expect(textOf(chose.result)).toBe('Selected browser "Home".')
-
-  const asked = await $.tool.call({
-    tool: 'AskUserQuestion',
-    questions: [{ question: 'Which browser?', header: 'Browser', multiSelect: false, options: [
-      { label: `Browser 1 (${WORK})`, description: '' },
-      { label: `Browser 2 (${HOME})`, description: '' },
-    ] }],
-  })
-  const options = (asked.result as { options: { description: string }[] }[])[0]?.options ?? []
-  expect(options[1]?.description).toBe('Lee <lee@example.com>, Chrome / Default Selected now.')
-})
-
-test('a list in one block with the note after it keeps the note and fixes its count', async ($, on) => {
-  fakeChrome(on)
-  on('tool.call', () => ({ result: [{ type: 'text', text: `${LIST_TEXT}${LIST_NOTE}` }] }))
-
-  const ran = await $.tool.call({ tool: LIST_TOOL })
-  const text = textOf(ran.result)
-  expect(text).toContain(']1 browsers are connected and none is selected for this session.')
-  expect(text).toContain('Hidden by chrome-profile-names')
-})
-
-test('when no listed browser is local, nothing is hidden', async ($, on) => {
+test('a list with no local browser is still rewritten, as long as this machine has profiles', async ($, on) => {
   fakeChrome(on)
   const onlyRemote = `[{"deviceId":"${OTHER}","name":"Browser 1","osPlatform":"macOS","isLocal":true}]`
   on('tool.call', () => ({ result: [{ type: 'text', text: onlyRemote }] }))
 
   const ran = await $.tool.call({ tool: LIST_TOOL })
-  expect(textOf(ran.result)).toBe(onlyRemote)
+  expect(textOf(ran.result)).toBe(`[{"deviceId":"${OTHER}","name":"Browser 1","osPlatform":"macOS","isLocal":true,"where":"another computer (macOS)"}]`)
 })
 
 test('a { content } shaped result is relabeled too', async ($, on) => {
@@ -192,33 +146,25 @@ test('a call the engine reported as an error is left alone', async ($, on) => {
   expect(String(ran.result)).toContain('"name":"Browser 1"')
 })
 
-test('the browser-choice dialog is relabeled', async ($, on) => {
+test('the picker shows Chrome names for local browsers and marks remote ones', { options: { remoteNames: `${OTHER}=mini` } }, async ($, on) => {
   fakeChrome(on)
   on('tool.call', (_, e) => ({ result: e.tool === 'AskUserQuestion' ? e.questions : null }))
 
   const ran = await $.tool.call({
     tool: 'AskUserQuestion',
-    questions: [{
-      question: 'Which browser?',
-      header: 'Browser',
-      multiSelect: false,
-      options: [
-        { label: `Browser 1 (${WORK})`, description: 'macOS, local' },
-        { label: `Browser 2 (${OTHER})`, description: 'macOS, local' },
-        { label: 'Open a confirmation screen in every connected Chrome extension and let me select the right one there.', description: '' },
-      ],
-    }],
+    questions: [{ question: 'Which browser?', header: 'Browser', multiSelect: false, options: [
+      { label: `Browser 1 (${WORK})`, description: 'macOS, local' },
+      { label: `Browser 2 (${OTHER})`, description: 'macOS' },
+      { label: CONFIRM, description: '' },
+    ] }],
   })
-  const questions = ran.result as { options: { label: string; description: string }[] }[]
-  const options = questions[0]?.options ?? []
-  expect(options.map(o => o.label)).toEqual([
-    `Work (${WORK})`,
-    'Open a confirmation screen in every connected Chrome extension and let me select the right one there.',
-  ])
+  const options = (ran.result as { options: { label: string; description: string }[] }[])[0]?.options ?? []
+  expect(options.map(o => o.label)).toEqual([`Work (${WORK})`, `mini (${OTHER})`, CONFIRM])
   expect(options[0]?.description).toBe('macOS, local (Acme <lee@acme.example>, Chrome / Profile 1)')
+  expect(options[1]?.description).toBe('macOS (another computer)')
 })
 
-test('the dialog keeps a remote browser when hideRemote is off', { options: { hideRemote: false } }, async ($, on) => {
+test('an unnamed remote browser keeps its label and is marked as on another computer', async ($, on) => {
   fakeChrome(on)
   on('tool.call', (_, e) => ({ result: e.tool === 'AskUserQuestion' ? e.questions : null }))
 
@@ -229,33 +175,47 @@ test('the dialog keeps a remote browser when hideRemote is off', { options: { hi
       { label: `Browser 2 (${OTHER})`, description: '' },
     ] }],
   })
-  const questions = ran.result as { options: { label: string }[] }[]
-  expect(questions[0]?.options.map(o => o.label)).toEqual([`Home (${HOME})`, `Browser 2 (${OTHER})`])
+  const options = (ran.result as { options: { label: string; description: string }[] }[])[0]?.options ?? []
+  expect(options[1]).toEqual({ label: `Browser 2 (${OTHER})`, description: 'another computer' })
 })
 
-test('the dialog never drops below two options or to no local browser', async ($, on) => {
+test('the selected browser is marked in the picker, and "in use" becomes "selected"', async ($, on) => {
   fakeChrome(on)
-  on('tool.call', (_, e) => ({ result: e.tool === 'AskUserQuestion' ? e.questions : null }))
+  on('tool.call', (_, e) => e.tool === LIST_TOOL
+    ? { result: [{ type: 'text', text: `[{"deviceId":"${WORK}","name":"Browser 1","inUse":true},{"deviceId":"${HOME}","name":"Browser 2"}]` }] }
+    : { result: e.tool === 'AskUserQuestion' ? e.questions : null })
 
-  // Two browsers, no confirmation option: dropping the remote one would leave one option.
-  const two = await $.tool.call({
+  await $.tool.call({ tool: LIST_TOOL })
+  const ran = await $.tool.call({
     tool: 'AskUserQuestion',
     questions: [{ question: 'Which browser?', header: 'Browser', multiSelect: false, options: [
-      { label: `Browser 1 (${HOME})`, description: '' },
-      { label: `Browser 2 (${OTHER})`, description: '' },
+      { label: `Browser 1 (${WORK})`, description: 'Currently in use.' },
+      { label: `Browser 2 (${HOME})`, description: '' },
     ] }],
   })
-  expect((two.result as { options: { label: string }[] }[])[0]?.options.length).toBe(2)
+  const options = (ran.result as { options: { label: string; description: string }[] }[])[0]?.options ?? []
+  expect(options[0]?.description).toBe('Currently selected. (Acme <lee@acme.example>, Chrome / Profile 1)')
+  expect(options[1]?.description).toBe('Lee <lee@example.com>, Chrome / Default')
+})
 
-  // Only remote browsers: nothing to prefer, nothing dropped.
-  const none = await $.tool.call({
+test('choosing a browser answers with its name and marks it selected afterwards', async ($, on) => {
+  fakeChrome(on)
+  on('tool.call', (_, e) => e.tool === SELECT_TOOL
+    ? { result: [{ type: 'text', text: 'Selected browser "Browser 2".' }] }
+    : { result: e.tool === 'AskUserQuestion' ? e.questions : null })
+
+  const chose = await $.tool.call({ tool: SELECT_TOOL, deviceId: HOME })
+  expect(textOf(chose.result)).toBe('Selected browser "Home".')
+
+  const asked = await $.tool.call({
     tool: 'AskUserQuestion',
     questions: [{ question: 'Which browser?', header: 'Browser', multiSelect: false, options: [
-      { label: `Browser 1 (${OTHER})`, description: '' },
-      { label: 'Open a confirmation screen in every connected Chrome extension and let me select the right one there.', description: '' },
+      { label: `Browser 1 (${WORK})`, description: '' },
+      { label: `Browser 2 (${HOME})`, description: '' },
     ] }],
   })
-  expect((none.result as { options: { label: string }[] }[])[0]?.options.length).toBe(2)
+  const options = (asked.result as { options: { description: string }[] }[])[0]?.options ?? []
+  expect(options[1]?.description).toBe('Lee <lee@example.com>, Chrome / Default Selected now.')
 })
 
 test('a question with no device ids is passed through without touching the disk', async ($, on) => {
@@ -275,5 +235,5 @@ test('with no Chrome on disk, everything passes through', async ($, on) => {
   on('tool.call', () => ({ result: [{ type: 'text', text: LIST_TEXT }] }))
 
   const ran = await $.tool.call({ tool: LIST_TOOL })
-  expect(textOf(ran.result)).toContain('"name":"Browser 1"')
+  expect(textOf(ran.result)).toBe(LIST_TEXT)
 })

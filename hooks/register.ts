@@ -1,12 +1,13 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { scan, type Profile, type ProfileMap } from './profiles'
+import { scan, type ProfileMap } from './profiles'
 
 // The Claude in Chrome extension calls connected browsers "Browser 1" and
 // "Browser 2" and tells them apart by a device ID. Chrome knows more: which
 // profile the browser is, and the name you typed when you paired it. This
-// mod shows those names instead, and hides browsers that aren't paired in
-// any Chrome profile on this machine.
+// mod shows those names instead. A browser that isn't paired in any Chrome
+// profile on this machine is on another computer; it's shown as such, with
+// the name from the `remoteNames` setting if you gave it one.
 
 const LIST_TOOL = 'mcp__claude-in-chrome__list_connected_browsers'
 const SELECT_TOOL = 'mcp__claude-in-chrome__select_browser'
@@ -14,6 +15,7 @@ const SWITCH_TOOL = 'mcp__claude-in-chrome__switch_browser'
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 const BROWSER_N = /\bBrowser \d+\b/
 const CACHE_MS = 5 * 60 * 1000
+const ELSEWHERE = 'another computer'
 
 let cache: { at: number; map: ProfileMap } | undefined
 let selected: string | undefined // device ID of the browser this session's actions go to
@@ -32,36 +34,71 @@ async function profiles($: EngineInterface): Promise<ProfileMap> {
   return map
 }
 
+/** Names for browsers on other computers, from the `remoteNames` setting: `deviceId=name` entries separated by commas or newlines. */
+function parseRemoteNames(setting: unknown): Map<string, string> {
+  const entries = typeof setting === 'string' ? setting.split(/[\n,]/) : []
+  const names = new Map<string, string>()
+  for (const entry of entries) {
+    const m = /^\s*([0-9a-f-]{36})\s*[=:]\s*(.+?)\s*$/i.exec(String(entry))
+    if (m) names.set(m[1]!.toLowerCase(), m[2]!)
+  }
+  return names
+}
+
+/** What we know about one browser: its name, where it is, and whether it's on this machine. */
+type Known = { name: string; where: string; local: boolean }
+type Lookup = (id: string) => Known | undefined
+
+function lookupWith(map: ProfileMap, remoteNames: Map<string, string>): Lookup {
+  return id => {
+    const key = id.toLowerCase()
+    const local = map.get(key)
+    if (local) return { name: local.name, where: local.profile, local: true }
+    const remote = remoteNames.get(key)
+    return remote ? { name: remote, where: ELSEWHERE, local: false } : undefined
+  }
+}
+
 function idsIn(text: string): string[] {
   return [...new Set((text.match(UUID) ?? []).map(id => id.toLowerCase()))]
 }
 
-/** Fixes the sentence the extension writes after its list: `"Browser 2" (deviceId …)` gets the Chrome name, and "in use" becomes "selected". */
-function relabelProse(text: string, map: ProfileMap): string {
+/** "just now", "12 minutes ago", "5 hours ago", "3 days ago". */
+function ago(then: number, now: number): string {
+  const minutes = Math.round((now - then) / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  const days = Math.round(hours / 24)
+  return `${days} days ago`
+}
+
+/** Fixes the sentence the extension writes after its list: `"Browser 2" (deviceId …)` gets the name, and "in use" becomes "selected". */
+function relabelProse(text: string, lookup: Lookup): string {
   return text
     .replace(/"Browser \d+" \(deviceId ([0-9a-f-]{36})\)/gi, (whole, id: string) => {
-      const known = map.get(id.toLowerCase())
+      const known = lookup(id)
       return known ? `"${known.name}" (deviceId ${id})` : whole
     })
     .replace(/\bin use\b/g, 'selected')
     .replace(/\bpicked last\b/g, 'selected last')
 }
 
-type Listed = { deviceId: string; name?: unknown; inUse?: unknown }
+type Listed = { deviceId: string; name?: unknown; inUse?: unknown; osPlatform?: unknown; connectedAt?: unknown }
 
 function isListed(x: unknown): x is Listed {
   return typeof x === 'object' && x !== null && typeof (x as Listed).deviceId === 'string'
 }
 
 /**
- * Rewrites the extension's browser list. Each browser paired on this machine
- * gets its Chrome name and a `profile` field. With `hide`, the other browsers
- * are dropped, the count after the list is fixed, and a sentence says what
- * was dropped. If no browser in the list is paired here, the list is left
- * alone, because the scanner may just be unable to read that profile. Text
- * with no list in it only gets the sentence fix.
+ * Rewrites the extension's browser list. A browser paired on this machine
+ * gets its Chrome name and a `profile` field. Any other browser is on
+ * another computer: it gets a `where` field saying so, with its OS and how
+ * long ago it connected, and the name from `remoteNames` if there is one.
+ * Text with no list in it only gets the sentence fix.
  */
-function rewriteList(text: string, map: ProfileMap, hide: boolean): string {
+function rewriteList(text: string, lookup: Lookup, now: number): string {
   const start = text.indexOf('[')
   const end = text.lastIndexOf(']')
   let list: unknown
@@ -70,26 +107,17 @@ function rewriteList(text: string, map: ProfileMap, hide: boolean): string {
   } catch {
     list = undefined
   }
-  if (!Array.isArray(list) || !list.every(isListed)) return relabelProse(text, map)
+  if (!Array.isArray(list) || !list.every(isListed)) return relabelProse(text, lookup)
 
   selected = list.find(b => b.inUse === true)?.deviceId.toLowerCase() ?? selected
-  const named = list.map(b => {
-    const known = map.get(b.deviceId.toLowerCase())
-    return known ? { ...b, name: known.name, profile: known.profile } : b
+  const rewritten = list.map(b => {
+    const known = lookup(b.deviceId)
+    if (known?.local) return { ...b, name: known.name, profile: known.where }
+    const os = typeof b.osPlatform === 'string' ? ` (${b.osPlatform})` : ''
+    const since = typeof b.connectedAt === 'number' ? `, connected ${ago(b.connectedAt, now)}` : ''
+    return { ...b, ...(known ? { name: known.name } : {}), where: `${ELSEWHERE}${os}${since}` }
   })
-  const local = named.filter(b => map.has(b.deviceId.toLowerCase()))
-  const remote = named.filter(b => !map.has(b.deviceId.toLowerCase()))
-  const hiding = hide && local.length > 0 && remote.length > 0
-  if (local.length === 0 && !hiding) return relabelProse(text, map)
-
-  let rest = relabelProse(text.slice(end + 1), map)
-  let note = ''
-  if (hiding) {
-    rest = rest.replace(/^\s*\d+ browsers are connected/, `${local.length} browsers are connected`)
-    const gone = remote.map(b => `${typeof b.name === 'string' ? b.name : 'unnamed'} (${b.deviceId})`).join(', ')
-    note = ` Hidden by chrome-profile-names, not paired in any Chrome profile on this machine: ${gone}.`
-  }
-  return `${text.slice(0, start)}${JSON.stringify(hiding ? local : named)}${rest}${note}`
+  return `${text.slice(0, start)}${JSON.stringify(rewritten)}${relabelProse(text.slice(end + 1), lookup)}`
 }
 
 type Block = { type?: unknown; text?: unknown }
@@ -117,53 +145,46 @@ function mapResult(result: unknown, fn: (text: string) => string): unknown {
 
 type Option = { label: string; description: string; preview?: string }
 
-/** Finds the device ID in an option's label or description, and the profile for it if we have one. */
-function profileOf(option: Option, map: ProfileMap): [string, Profile | undefined] | undefined {
+/**
+ * Relabels one picker option. A local browser gets its Chrome name and
+ * profile; a remote one is marked as being on another computer, with its
+ * name from `remoteNames` if there is one. The browser the session is using
+ * is marked selected.
+ */
+function relabelOption(option: Option, lookup: Lookup): Option {
   const id = idsIn(`${option.label} ${option.description}`)[0]
-  return id === undefined ? undefined : [id, map.get(id)]
-}
-
-function relabelOption(option: Option, map: ProfileMap): Option {
-  const [id, known] = profileOf(option, map) ?? []
-  if (!id || !known) return option
-  const { name, profile } = known
-  let label = option.label.replace(BROWSER_N, name)
-  if (!label.includes(name)) label = `${name} (${label})`
-  let description = option.description.replace(BROWSER_N, name).replace(/\bin use\b/gi, 'selected')
-  if (!description.includes(profile)) description = description ? `${description} (${profile})` : profile
+  if (id === undefined) return option
+  const known = lookup(id) ?? { name: undefined, where: ELSEWHERE, local: false }
+  let label = option.label
+  let description = option.description.replace(/\bin use\b/gi, 'selected')
+  if (known.name !== undefined) {
+    label = label.replace(BROWSER_N, known.name)
+    if (!label.includes(known.name)) label = `${known.name} (${label})`
+    description = description.replace(BROWSER_N, known.name)
+  }
+  if (!description.includes(known.where)) description = description ? `${description} (${known.where})` : known.where
   if (id === selected && !/\bselected\b/i.test(description)) description = `${description} Selected now.`
   return { ...option, label, description }
 }
 
-/**
- * Relabels the picker's options and, with `hide`, drops the ones for
- * browsers on other machines. Options that name no browser (the "open a
- * confirmation screen" one) stay. Nothing is dropped unless at least one
- * local browser remains and the dialog still has its minimum of two options.
- */
-function rewriteOptions(options: Option[], map: ProfileMap, hide: boolean): Option[] {
-  const named = options.map(option => relabelOption(option, map))
-  if (!hide) return named
-  const kind = (option: Option) => {
-    const found = profileOf(option, map)
-    return found === undefined ? 'none' : found[1] === undefined ? 'remote' : 'local'
-  }
-  const kept = named.filter(option => kind(option) !== 'remote')
-  const hasLocal = kept.some(option => kind(option) === 'local')
-  return hasLocal && kept.length >= 2 && kept.length < named.length ? kept : named
+/** The lookup for one call, or undefined when no profile on this machine can be read (then nothing is touched). */
+async function lookupFor($: EngineInterface, remoteNames: Map<string, string>): Promise<Lookup | undefined> {
+  const map = await profiles($)
+  return map.size === 0 ? undefined : lookupWith(map, remoteNames)
 }
 
 export const register: Register = (on, options) => {
-  const hide = options.hideRemote !== false
+  const remoteNames = parseRemoteNames(options.remoteNames)
 
   // The extension's list. Fixing it here means the right name shows up
   // everywhere Claude mentions the browser, not just in the picker.
   on('tool.call', { tool: LIST_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
-    const map = await profiles($)
-    if (map.size === 0) return ran
-    const result = mapResult(ran.result, text => rewriteList(text, map, hide))
+    const lookup = await lookupFor($, remoteNames)
+    if (!lookup) return ran
+    const now = await $.clock.now()
+    const result = mapResult(ran.result, text => rewriteList(text, lookup, now))
     return result === undefined ? ran : { result }
   }).catch(($, e, next) => next(e))
 
@@ -173,7 +194,7 @@ export const register: Register = (on, options) => {
     if (ran.deny !== undefined || ran.isError === true) return ran
     const id = typeof e.deviceId === 'string' ? e.deviceId.toLowerCase() : undefined
     if (id) selected = id
-    const known = id ? (await profiles($)).get(id) : undefined
+    const known = id ? (await lookupFor($, remoteNames))?.(id) : undefined
     if (!known) return ran
     const result = mapResult(ran.result, text => text.replace(/"Browser \d+"/, `"${known.name}"`))
     return result === undefined ? ran : { result }
@@ -183,18 +204,22 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: SWITCH_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
-    const map = await profiles($)
-    if (map.size === 0) return ran
-    const result = mapResult(ran.result, text => rewriteList(text, map, false))
+    const lookup = await lookupFor($, remoteNames)
+    if (!lookup) return ran
+    const now = await $.clock.now()
+    const result = mapResult(ran.result, text => rewriteList(text, lookup, now))
     return result === undefined ? ran : { result }
   }).catch(($, e, next) => next(e))
 
   // The picker itself, in case Claude wrote it from memory rather than from the list.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     if (idsIn(JSON.stringify(e.questions)).length === 0) return next(e)
-    const map = await profiles($)
-    if (map.size === 0) return next(e)
-    const questions = e.questions.map(question => ({ ...question, options: rewriteOptions(question.options, map, hide) }))
+    const lookup = await lookupFor($, remoteNames)
+    if (!lookup) return next(e)
+    const questions = e.questions.map(question => ({
+      ...question,
+      options: question.options.map(option => relabelOption(option, lookup)),
+    }))
     return next({ ...e, questions })
   }).catch(($, e, next) => next(e))
 }
