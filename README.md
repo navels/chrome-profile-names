@@ -14,7 +14,7 @@ The mod hooks the extension's tool calls:
 - `select_browser` and `switch_browser`: the confirmation names the browser the same way.
 - `AskUserQuestion`: any option that names a known device ID gets the Chrome name as its label, and the browser the session is currently using is marked selected.
 
-A browser whose device ID isn't paired in any Chrome profile on this machine is on another computer. By default the mod hides those from the list and the picker, and adds a sentence after the list saying what it hid, so you only choose among the browsers in front of you. If the mod can't match any of the listed browsers to a profile on this machine, it hides nothing, so a browser it failed to recognize still shows up. If you do want to control browsers on other machines from this one, turn hiding off with the `hideRemote` setting in `/config`.
+A browser whose device ID isn't paired in any Chrome profile on this machine is on another computer. By default the mod hides those from the list and the picker, and adds a sentence after the list saying what it hid, so you only choose among the browsers in front of you. One exception: if none of the browsers can be found on this computer, nothing is hidden. That way, if the mod can't read your Chrome profiles at all, you still see every browser. If you do want to control browsers on other machines from this one, turn hiding off with the `hideRemote` setting in `/config`.
 
 With hiding off, a device ID the mod can't find on this machine is left as it was. The mod doesn't guess, because a wrong name here means acting in the wrong browser.
 

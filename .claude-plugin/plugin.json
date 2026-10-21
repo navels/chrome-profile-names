@@ -10,7 +10,7 @@
   "userConfig": {
     "hideRemote": {
       "type": "boolean",
-      "description": "Hide browsers that aren't paired in any Chrome profile on this machine, since they're on another computer. If the mod can't match any of the listed browsers to a profile here, it hides nothing, so a browser it failed to recognize still shows up.",
+      "description": "Hide browsers that belong to other computers. If none of the browsers can be found on this computer, nothing is hidden.",
       "default": true,
       "title": "Hide browsers on other machines"
     }
