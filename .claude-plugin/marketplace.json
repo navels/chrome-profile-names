@@ -1,0 +1,6 @@
+{
+  "name": "chrome-profile-names",
+  "description": "Chrome profile names in Claude Code's browser picker for the Claude in Chrome extension.",
+  "owner": { "name": "Lee Nave", "url": "https://github.com/navels" },
+  "plugins": [{ "name": "chrome-profile-names", "source": "./" }]
+}
